@@ -1,0 +1,634 @@
+/*********************************************************************************************************
+Title: SAMHSA MATCH Grant Measure 9
+
+Code Written By: Virginia Tinoco [Population Health Data Analyst] @ Santa Rosa Community Health, Santa Rosa CA
+Started: 7/10/2019
+
+
+Description:
+  NUMERATOR: # MAT Stabilization Clinic patients w/ reduced levels of opioids on UTOX screens at 6 months after enrollment compared with first UTOX screen
+  DENOMINATOR: # of patients participating in MAT Stabilization Clinic for 6+ months with multiple UTOX screens
+
+Report Sets: Behavioral Health
+
+Data Source: Staging Database
+Hide Results Table: No
+Exposes PHI: Yes
+
+Revision History:
+7/25/2019 - added temporary tables to create view for
+            comparable entry and exit dates.
+9/17/2019 - added denominator to result set
+
+New tables were:
+           concat_entry_dates
+           entry_dates
+           concat_exit_dates
+           exit_dates
+           denominator
+
+Validation Dates: N/A
+
+Parameters: N/A
+
+Resources Used:
+https://stackoverflow.com/questions/51224/regular-expression-to-match-valid-dates
+https://stackoverflow.com/questions/24301939/postgresql-cast-string-to-date-dd-mm-yyyy
+
+Transformers Used: [[
+  relevant_patients
+]]
+*********************************************************************************************************/
+--Retrieve Population/Project Name
+DROP TABLE IF EXISTS program_name_table;
+CREATE TEMP TABLE program_name_table AS
+
+SELECT DISTINCT
+      subb.encounterid,
+      subb.value AS Population_Project
+FROM
+     structhpi subb
+INNER JOIN
+     structdatadetail suba ON subb.catid = suba.catid
+WHERE
+     subb.catid = 568271 AND subb.detailid  = 4466; -- contains the response holding the name of the project
+
+-- Add the STATUS column to the report.
+DROP TABLE IF EXISTS program_status_table;
+CREATE TEMPORARY TABLE program_status_table AS
+
+SELECT DISTINCT
+      subb.encounterid,
+      subb.value AS STATUS
+FROM
+     structhpi subb
+INNER JOIN
+     structdatadetail suba ON subb.catid = suba.catid
+WHERE
+     subb.catid = 568271 AND subb.detailid  = 4467; -- contains the response whether it is an Exit or Entry
+
+-- Add the Date of Status column to the report
+DROP TABLE IF EXISTS program_dateofstatus_table;
+CREATE TEMPORARY TABLE program_dateofstatus_table AS
+
+SELECT DISTINCT
+      subb.encounterid,
+      subb.value AS Date_Of_Status
+FROM
+     structhpi subb
+INNER JOIN
+     structdatadetail suba ON subb.catid = suba.catid
+WHERE
+     subb.catid = 568271 AND subb.detailid  = 4469; -- contains the date of the STATUS
+
+-- Create a table of Ca Bridge Referral From column
+DROP TABLE IF EXISTS program_CAREF_table;
+CREATE TEMPORARY TABLE program_CAREF_table AS
+
+SELECT DISTINCT
+      subb.encounterid,
+      subb.value AS CA_BRIDGE_REFERRAL_FROM
+FROM
+     structhpi subb
+INNER JOIN
+     structdatadetail suba ON subb.catid = suba.catid
+WHERE
+     subb.catid = 568271 AND subb.detailid  = 4520; -- Contains the response on who sent the referral, for if the patient was referred to CA Bridge
+
+--create table that retrives only the entry dates. Concatenated with STATUS entry to later place as value in the column.
+DROP TABLE IF EXISTS concat_entry_dates;
+CREATE  TEMPORARY TABLE concat_entry_dates AS
+
+SELECT DISTINCT
+       rp.mrn,
+       CASE WHEN ps.STATUS = 'Entry' THEN ps.STATUS || ' ' ||pds.Date_Of_Status ELSE NULL END AS Pre_Entry_Date
+FROM
+     relevant_patients rp
+INNER JOIN
+     enc rv ON rp.id = rv.patientid
+INNER JOIN
+     program_name_table pn ON pn.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     program_status_table ps ON ps.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     program_dateofstatus_table pds ON pds.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     program_CAREF_table pca ON pca.encounterid = rv.encounterid
+WHERE
+     CASE WHEN ps.STATUS = 'Entry' THEN ps.STATUS || pds.Date_Of_Status ELSE NULL END IS NOT NULL;
+
+--Create table that pulls every patient with an most recent entry date. Concatenated with STATUS entry to later place as value in the column.
+DROP TABLE IF EXISTS entry_dates;
+CREATE  TEMPORARY TABLE entry_dates AS
+SELECT *
+FROM
+(SELECT
+      c.mrn,
+   -- c.Pre_Entry_Date,
+      CAST(substring(c.Pre_Entry_Date, '([0-9]{2}/[0-9]{2}/[0-9]{4})') AS DATE) AS Entry_Date,
+      rank() over (PARTITION BY c.mrn order by CAST(substring(c.Pre_Entry_Date, '([0-9]{2}/[0-9]{2}/[0-9]{4})') AS DATE) DESC) AS ROWNUM
+
+FROM
+      concat_entry_dates c) AS most_recent_entry_date
+WHERE
+      most_recent_entry_date.ROWNUM = 1;
+
+
+---create table that retrives only the exit dates. concatenated with STATUS exit. Concatenated with STATUS entry to later place as value in the column.
+DROP TABLE IF EXISTS concat_exit_dates;
+CREATE  TEMPORARY TABLE concat_exit_dates AS
+
+SELECT DISTINCT
+       rp.mrn,
+       CASE WHEN ps.STATUS = 'Exit' THEN ps.STATUS || ' ' ||pds.Date_Of_Status ELSE NULL END AS Pre_Exit_Date
+FROM
+     relevant_patients rp
+INNER JOIN
+     enc rv ON rp.id = rv.patientid
+INNER JOIN
+     program_name_table pn ON pn.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     program_status_table ps ON ps.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     program_dateofstatus_table pds ON pds.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     program_CAREF_table pca ON pca.encounterid = rv.encounterid
+WHERE
+     CASE WHEN ps.STATUS = 'Exit' THEN ps.STATUS || pds.Date_Of_Status ELSE NULL END IS NOT NULL;
+
+--Create table that pulls every patient with a most recent exit date
+DROP TABLE IF EXISTS exit_dates;
+CREATE TEMPORARY TABLE exit_dates AS
+
+SELECT *
+FROM
+    (SELECT
+      d.mrn,
+   -- d.Pre_Exit_Date,
+      CAST(substring(d.Pre_Exit_Date, '([0-9]{2}/[0-9]{2}/[0-9]{4})') AS DATE) AS Exit_Date,
+      rank() over (PARTITION BY d.mrn order by CAST(substring(d.Pre_Exit_Date, '([0-9]{2}/[0-9]{2}/[0-9]{4})') AS DATE) DESC ) AS ROWNUM2
+
+      FROM concat_exit_dates d
+      ) AS most_recent_exit_dates
+WHERE
+     most_recent_exit_dates.ROWNUM2 = 1;
+
+--create combined entry and exit date table.
+DROP TABLE IF EXISTS MAT_dates;
+CREATE  TEMPORARY TABLE MAT_dates AS
+
+SELECT DISTINCT
+       rp.id,
+       rp.mrn,
+       pn.Population_Project,
+       ced.Exit_Date,
+       ctd.Entry_Date,
+       CASE WHEN ced.Exit_Date < ctd.Entry_Date OR ced.Exit_Date IS NULL THEN 'Active' ELSE 'Inactive' END AS Current_Patient_Status
+FROM
+     relevant_patients rp
+INNER JOIN
+     enc rv ON rp.id = rv.patientid
+INNER JOIN
+     program_name_table pn ON pn.encounterid = rv.encounterid
+LEFT OUTER JOIN
+     exit_dates ced ON rp.mrn = ced.mrn
+LEFT OUTER JOIN
+     entry_dates ctd ON ctd.mrn = rp.mrn
+WHERE
+      pn.Population_Project NOT ILIKE '%Assist%' OR pn.Population_Project NOT ILIKE '%trans%';
+
+--Create table that shows length of time in program.
+DROP TABLE IF EXISTS mat_program_patients_time;
+CREATE TEMPORARY TABLE mat_program_patients_time AS
+
+SELECT DISTINCT
+       mds.id,
+       mds.mrn,
+       mds.Population_Project,
+       mds.Exit_Date,
+       mds.Entry_Date,
+       CASE WHEN (mds.Entry_Date > mds.Exit_Date) OR  (mds.Exit_Date IS NULL) THEN age(current_date, mds.Entry_Date)
+            ELSE age(mds.Exit_Date, mds.Entry_Date) END AS time_elapsed
+FROM
+       MAT_dates mds;
+
+
+
+--Create UTOX screens table
+DROP TABLE IF EXISTS UTOX_labs;
+CREATE TEMPORARY TABLE UTOX_labs AS
+
+SELECT
+       l.patientid,
+       l.reportid,
+       l.lab,
+       l.result,
+       l.udsdate AS result_date,
+       hl.name,
+       hl.value
+FROM
+     relevant_uds_labs l
+INNER JOIN
+     hl7labdatadetail hl ON l.reportid = hl.reportid
+WHERE ((l.lab ILIKE '%URINE DRUG PANEL%') OR (l.lab ILIKE '%URINE DRUG PROFILE%') OR (l.lab ILIKE 'Drug monitoring, opiates%')
+       OR (l.lab ILIKE 'Drug monitoring, oxy%') OR  (l.lab ILIKE 'Drug monitoring, opiates%')OR (l.lab ILIKE 'Drug monitoring, methadone%') OR (l.lab ILIKE '%fent%'));
+--AND (l.patientid = 22708);
+
+/*
+CREATE INDEX index_bam_form_on_patient_id ON bam_form (patient_id);
+CREATE INDEX index_bam_form_on_on_date ON bam_form (date);
+*/
+--MAT patients participating in program for 6 months or more--
+DROP TABLE IF EXISTS mat_six_months;
+CREATE TEMPORARY TABLE mat_six_months AS
+SELECT DISTINCT
+       mtp.id AS patientid,
+       mtp.mrn,
+       mtp.Entry_Date,
+       mtp.Exit_Date,
+       mtp.time_elapsed,
+       DATE_PART('month',mtp.time_elapsed) AS Months
+/*      uds.udsdate,
+        uds.lab,
+        uds.result,
+        ld.name,
+       ld.value*/
+       --rv.date :: DATE AS Visit_Date,
+     --  pn.Population_Project,
+       --ps.STATUS,
+       --pds.Date_Of_Status,
+/*       pca.CA_BRIDGE_REFERRAL_FROM,
+       md.Current_Patient_Status,
+       bm.date AS BAM_Date,
+       bm.Question,
+       bm.Answer*/
+
+FROM
+     mat_program_patients_time mtp
+WHERE
+     DATE_PART('month',mtp.time_elapsed) >= 6;
+/*LEFT OUTER JOIN
+     UTOX_labs uds ON uds.patientid = mtp.id
+INNER JOIN
+     hl7labdatadetail ld ON ld.reportid = uds.reportid
+
+WHERE  (ld.name ILIKE '%Codeine%' OR ld.name ILIKE '%Methadone%' OR ld.name ILIKE '%Methadone%' OR ld.name ILIKE '%Fentanyl%'
+   OR ld.name ILIKE '%Hydrocodone%' OR ld.name ILIKE '%Hydromorphone%' OR ld.name ILIKE '%Morphine%')*/
+
+
+
+--Create temporary table that retieves the full denominator. This means all patients who participated
+--in MAT Stabilization Clinic for 6 months or more AND have had more than one UTOX screen.
+DROP TABLE IF EXISTS six_month_patients_utox;
+CREATE TEMPORARY TABLE six_month_patients_utox AS
+
+SELECT
+     msm.patientid,
+     msm.Entry_Date,
+     msm.Exit_Date,
+     msm.mrn,
+     utx.lab,
+     utx.result,
+     utx.result_date,
+     utx.name,
+     utx.value
+FROM
+     mat_six_months msm
+INNER JOIN
+     UTOX_labs utx ON utx.patientid = msm.patientid;
+
+--Create temporary table to view only the first UTOX screen from the enrollment date.
+DROP TABLE IF EXISTS first_utox;
+CREATE TEMPORARY TABLE first_utox AS
+SELECT DISTINCT ON (smu.patientid,        CASE WHEN smu.name ILIKE '%Codeine%'       THEN 'Codeine'
+          WHEN smu.name ILIKE '%Fentanyl%'      THEN 'Fentanyl'
+          WHEN smu.name ILIKE '%Hydrocodone%'   THEN 'Hyrdocodone'
+          WHEN smu.name ILIKE '%Hydromorphone%' THEN 'Hydromorphone'
+          WHEN smu.name ILIKE '%Methadone%'     THEN 'Methadone'
+          WHEN smu.name ILIKE '%Morphine%'      THEN 'Morphine'
+          WHEN smu.name ILIKE '%Oxycodone%'     THEN 'Oxycodone'
+          WHEN smu.name ILIKE '%oxymorphone%'   THEN 'Oxymorphone'
+          WHEN smu.name ILIKE '%Tramadol%'      THEN 'Tramadol'
+     END)
+
+     smu.patientid,
+     smu.Entry_Date,
+     smu.Exit_Date,
+     smu.mrn,
+     smu.lab,
+     smu.result,
+     smu.result_date,
+CASE WHEN smu.name ILIKE '%Codeine%'       THEN 'Codeine'
+          WHEN smu.name ILIKE '%Fentanyl%'      THEN 'Fentanyl'
+          WHEN smu.name ILIKE '%Hydrocodone%'   THEN 'Hyrdocodone'
+          WHEN smu.name ILIKE '%Hydromorphone%' THEN 'Hydromorphone'
+          WHEN smu.name ILIKE '%Methadone%'     THEN 'Methadone'
+          WHEN smu.name ILIKE '%Morphine%'      THEN 'Morphine'
+          WHEN smu.name ILIKE '%Oxycodone%'     THEN 'Oxycodone'
+          WHEN smu.name ILIKE '%oxymorphone%'   THEN 'Oxymorphone'
+          WHEN smu.name ILIKE '%Tramadol%'      THEN 'Tramadol'
+     END AS opiate_name,
+     smu.value
+
+FROM
+     six_month_patients_utox smu
+WHERE
+     (smu.name ILIKE '%Codeine%' OR smu.name ILIKE '%Methadone%' OR smu.name ILIKE '%Fentanyl%'
+      OR smu.name ILIKE '%Hydrocodone%' OR smu.name ILIKE '%Hydromorphone%' OR smu.name ILIKE '%Morphine%'
+      OR smu.name ILIKE '%oxycodone%' OR smu.name ILIKE '%oxymorphone%' OR smu.name ILIKE '%tramadol%')
+AND
+     (smu.result_date >= smu.Entry_Date)
+ORDER BY
+      smu.patientid,  CASE WHEN smu.name ILIKE '%Codeine%'       THEN 'Codeine'
+          WHEN smu.name ILIKE '%Fentanyl%'      THEN 'Fentanyl'
+          WHEN smu.name ILIKE '%Hydrocodone%'   THEN 'Hyrdocodone'
+          WHEN smu.name ILIKE '%Hydromorphone%' THEN 'Hydromorphone'
+          WHEN smu.name ILIKE '%Methadone%'     THEN 'Methadone'
+          WHEN smu.name ILIKE '%Morphine%'      THEN 'Morphine'
+          WHEN smu.name ILIKE '%Oxycodone%'     THEN 'Oxycodone'
+          WHEN smu.name ILIKE '%oxymorphone%'   THEN 'Oxymorphone'
+          WHEN smu.name ILIKE '%Tramadol%'      THEN 'Tramadol'
+     END, smu.result_date ASC;
+
+
+--Create temporary table to view only the second UTOX screen from the enrollment date.
+DROP TABLE IF EXISTS sixmo_utox;
+CREATE TEMPORARY TABLE sixmo_utox AS
+SELECT DISTINCT ON (smu.patientid,            CASE WHEN smu.name ILIKE '%Codeine%'       THEN 'Codeine'
+          WHEN smu.name ILIKE '%Fentanyl%'      THEN 'Fentanyl'
+          WHEN smu.name ILIKE '%Hydrocodone%'   THEN 'Hyrdocodone'
+          WHEN smu.name ILIKE '%Hydromorphone%' THEN 'Hydromorphone'
+          WHEN smu.name ILIKE '%Methadone%'     THEN 'Methadone'
+          WHEN smu.name ILIKE '%Morphine%'      THEN 'Morphine'
+          WHEN smu.name ILIKE '%Oxycodone%'     THEN 'Oxycodone'
+          WHEN smu.name ILIKE '%oxymorphone%'   THEN 'Oxymorphone'
+          WHEN smu.name ILIKE '%Tramadol%'      THEN 'Tramadol'
+     END)
+
+     smu.patientid,
+     smu.Entry_Date,
+     smu.Exit_Date,
+     smu.mrn,
+     smu.lab,
+     smu.result,
+     smu.result_date,
+     CASE WHEN smu.name ILIKE '%Codeine%'       THEN 'Codeine'
+          WHEN smu.name ILIKE '%Fentanyl%'      THEN 'Fentanyl'
+          WHEN smu.name ILIKE '%Hydrocodone%'   THEN 'Hyrdocodone'
+          WHEN smu.name ILIKE '%Hydromorphone%' THEN 'Hydromorphone'
+          WHEN smu.name ILIKE '%Methadone%'     THEN 'Methadone'
+          WHEN smu.name ILIKE '%Morphine%'      THEN 'Morphine'
+          WHEN smu.name ILIKE '%Oxycodone%'     THEN 'Oxycodone'
+          WHEN smu.name ILIKE '%Oxymorphone%'   THEN 'Oxymorphone'
+          WHEN smu.name ILIKE '%Tramadol%'      THEN 'Tramadol'
+     END AS opiate_name,
+     smu.value
+
+FROM
+     six_month_patients_utox smu
+WHERE
+     (smu.name ILIKE '%Codeine%' OR smu.name ILIKE '%Methadone%' OR smu.name ILIKE '%Fentanyl%'
+      OR smu.name ILIKE '%Hydrocodone%' OR smu.name ILIKE '%Hydromorphone%' OR smu.name ILIKE '%Morphine%'
+      OR smu.name ILIKE '%oxycodone%' OR smu.name ILIKE '%oxymorphone%' OR smu.name ILIKE '%tramadol%')
+AND
+     (smu.result_date >= smu.Entry_Date + INTERVAL '6 MONTHS')
+ORDER BY
+      smu.patientid,        CASE WHEN smu.name ILIKE '%Codeine%'       THEN 'Codeine'
+          WHEN smu.name ILIKE '%Fentanyl%'      THEN 'Fentanyl'
+          WHEN smu.name ILIKE '%Hydrocodone%'   THEN 'Hyrdocodone'
+          WHEN smu.name ILIKE '%Hydromorphone%' THEN 'Hydromorphone'
+          WHEN smu.name ILIKE '%Methadone%'     THEN 'Methadone'
+          WHEN smu.name ILIKE '%Morphine%'      THEN 'Morphine'
+          WHEN smu.name ILIKE '%Oxycodone%'     THEN 'Oxycodone'
+          WHEN smu.name ILIKE '%oxymorphone%'   THEN 'Oxymorphone'
+          WHEN smu.name ILIKE '%Tramadol%'      THEN 'Tramadol'
+     END, smu.result_date ASC;
+
+--Create temporary table that checks reduction of CODEINE--
+DROP TABLE IF EXISTS codeine_test;
+CREATE TEMPORARY TABLE codeine_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_codeine_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_codeine_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Codeine' AND sxm.opiate_name LIKE 'Codeine';
+
+--Create temporary table that checks reduction of FENTANYL
+DROP TABLE IF EXISTS fentanyl_test;
+CREATE TEMPORARY TABLE fentanyl_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' OR ftx.value LIKE '<0.50' THEN '0'
+     ELSE ftx.value END AS first_fentanyl_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_fentanyl_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Fentanyl' AND sxm.opiate_name LIKE 'Fentanyl';
+
+--Create temporary table that checks reduction of HYDROCODONE
+DROP TABLE IF EXISTS hydrocodone_test;
+CREATE TEMPORARY TABLE hydrocodone_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_Hydrocodone_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_Hydrocodone_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Hydrocodone' AND sxm.opiate_name LIKE 'Hydrocodone';
+
+--Create temporary table that checks reduction of HYDROMORPHONE
+DROP TABLE IF EXISTS hydromorphone_test;
+CREATE TEMPORARY TABLE hydromorphone_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_Hydromorphone_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_Hydromorphone_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Hydromorphone' AND sxm.opiate_name LIKE 'Hydromorphone';
+
+--Create temporary table that checks reduction of METHADONE
+DROP TABLE IF EXISTS methadone_test;
+CREATE TEMPORARY TABLE methadone_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_methadone_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_methadone_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Methadone' AND sxm.opiate_name LIKE 'Methadone';
+
+--Create temporary table that checks reduction of MORPHINE
+DROP TABLE IF EXISTS morphine_test;
+CREATE TEMPORARY TABLE morphine_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_morphine_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_morphine_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Morphine' AND sxm.opiate_name LIKE 'Morphine';
+
+--Create temporary table that checks reduction of OXYCODONE
+DROP TABLE IF EXISTS oxycodone_test;
+CREATE TEMPORARY TABLE oxycodone_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_oxycodone_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_oxycodone_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Oxycodone' AND sxm.opiate_name LIKE 'Oxycodone';
+
+--Create temporary table that checks reduction of OXYMORPHONE
+DROP TABLE IF EXISTS oxymorphone_test;
+CREATE TEMPORARY TABLE oxymorphone_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_oxymorphone_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_oxymorphone_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Oxymorphone' AND sxm.opiate_name LIKE 'Oxymorphone';
+
+--Create temporary table that checks reduction of TRAMADOL
+DROP TABLE IF EXISTS tramadol_test;
+CREATE TEMPORARY TABLE tramadol_test AS
+SELECT
+     ftx.patientid,
+     ftx.mrn,
+     ftx.opiate_name,
+    -- ftx.value AS value1,
+   --  sxm.value AS value2,
+     CASE WHEN ftx.value LIKE 'NEGATIVE' THEN '0'
+     ELSE ftx.value END AS first_tramadol_value,
+     CASE WHEN sxm.value LIKE 'NEGATIVE' THEN '0'
+     ELSE sxm.value END AS second_tramadol_value
+FROM
+     first_utox ftx
+LEFT OUTER JOIN
+     sixmo_utox sxm ON ftx.patientid = sxm.patientid
+WHERE
+     ftx.opiate_name LIKE 'Tramadol' AND sxm.opiate_name LIKE 'Tramadol';
+
+
+--test main query--
+
+SELECT DISTINCT
+       futox.mrn,
+ --      ct.first_codeine_value :: INT,
+ --      ct.second_codeine_value :: INT,
+       CASE WHEN ct.first_codeine_value > ct.second_codeine_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS codeine_level,
+       CASE WHEN ft.first_fentanyl_value > ft.second_fentanyl_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS fentanyl_level,
+       CASE WHEN ht.first_Hydrocodone_value > ht.second_Hydrocodone_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS hydrocodone_level,
+       CASE WHEN hm.first_Hydromorphone_value > hm.second_Hydromorphone_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS hydromorphone_level,
+       CASE WHEN mt.first_methadone_value > ht.second_Hydrocodone_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS methadone_level,
+       CASE WHEN mr.first_morphine_value > mr.second_morphine_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS morphine_level,
+       CASE WHEN ot.first_oxycodone_value > mr.second_morphine_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS oxycodone_level,
+       CASE WHEN om.first_oxymorphone_value > om.second_oxymorphone_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS oxycodone_level,
+       CASE WHEN tr.first_tramadol_value > tr.second_tramadol_value THEN 'REDUCED'
+            ELSE 'NO REDUCTION' END AS tramadol_level
+FROM
+      first_utox futox
+LEFT OUTER JOIN
+      codeine_test ct ON ct.patientid = futox.patientid
+LEFT OUTER JOIN
+      fentanyl_test ft ON ft.patientid = futox.patientid
+LEFT OUTER JOIN
+      hydrocodone_test ht ON ht.patientid = futox.patientid
+LEFT OUTER JOIN
+      hydromorphone_test hm ON hm.patientid = futox.patientid
+LEFT OUTER JOIN
+      methadone_test mt ON mt.patientid = futox.patientid
+LEFT OUTER JOIN
+      morphine_test mr  ON mr.patientid = futox.patientid
+LEFT OUTER JOIN
+      oxycodone_test ot ON ot.patientid = futox.patientid
+LEFT OUTER JOIN
+      oxymorphone_test om ON om.patientid = futox.patientid
+LEFT OUTER JOIN
+      tramadol_test tr ON tr.patientid = futox.patientid
+
+
+
