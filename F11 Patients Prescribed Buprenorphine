@@ -1,0 +1,130 @@
+/*********************************************************************************************************
+Title: F11 Patients Prescribed Buprenorphine
+
+Code Written By: Virginia Tinoco [Population Health Data Analyst] @ Santa Rosa Community Health, Santa Rosa CA
+Date Created: 2/28/2020
+Last Modified:
+
+--Purpose: Retrieve all F11 (Opioid Use Disorder) patients prescribed Buprenorphine during the reporting
+           period.
+*********************************************************************************************************/
+
+--Create problemListTable--
+DROP TABLE IF EXISTS problemListTable;
+CREATE TEMPORARY TABLE problemListTable AS
+
+SELECT
+      patients.ControlNo AS AccountNo,
+      problemlist.patientId,
+      COALESCE(problemlistlog.item, itemdetail.value) AS DiagCode,
+      problemlist.AddedDate :: DATE AS DateAdded,
+      COALESCE(problemlistlog.itemName, items.itemName) AS ProblemName,
+      users.ufname || ' ' || users.ulname AS Provider,
+      users.uid AS ProviderID
+FROM
+      items
+LEFT OUTER JOIN
+      (SELECT
+             itemdetail_1.itemID,
+             itemdetail_1.value
+       FROM
+             itemdetail AS itemdetail_1
+       INNER JOIN
+             items AS items_1 ON itemdetail_1.itemID = items_1.itemID
+       WHERE
+             (itemdetail_1.value NOT ILIKE '') AND (items_1.deleteFlag = 0)
+      ) AS itemdetail ON items.itemID = itemdetail.itemID
+RIGHT OUTER JOIN
+        patients
+INNER JOIN
+        problemlist ON patients.pid = problemlist.patientId ON items.itemID = problemlist.asmtId
+LEFT OUTER JOIN
+        (SELECT
+              A.patientId,
+              A.DiagCode,
+              A.ProblemName,
+              A.asmtId,
+              B.logDate,
+              A.AddedDate
+          FROM
+             (SELECT
+                   problemlist_1.patientId,
+                   problemlistlog_1.item AS DiagCode,
+                   problemlistlog_1.itemName AS ProblemName,
+                   problemlist_1.asmtId,
+                   problemlistlog_1.action,
+                   problemlist_1.AddedDate,
+                   problemlistlog_1.logDate
+              FROM
+                   problemlist AS problemlist_1
+              LEFT OUTER JOIN
+                   problemlistlog AS problemlistlog_1 ON problemlist_1.asmtId = problemlistlog_1.asmtId AND problemlist_1.patientId = problemlistlog_1.patientId
+              GROUP BY
+                   problemlist_1.patientId,
+                   problemlistlog_1.itemName,
+                   problemlistlog_1.item,
+                   problemlist_1.asmtId,
+                   problemlistlog_1.action,
+                   problemlist_1.AddedDate,
+                   problemlistlog_1.logDate
+              ) AS A
+          INNER JOIN
+              (SELECT
+                   problemlist_1.patientId,
+                   problemlist_1.asmtId,
+                   MAX(problemlistlog_1.logDate) AS logDate
+               FROM
+                   problemlist AS problemlist_1
+               LEFT OUTER JOIN
+                   problemlistlog AS problemlistlog_1 ON problemlist_1.asmtId = problemlistlog_1.asmtId AND problemlist_1.patientId = problemlistlog_1.patientId
+               GROUP BY
+                   problemlist_1.patientId,
+                   problemlist_1.asmtId
+              ) AS B ON A.logDate = B.logDate AND A.patientId = B.patientId AND A.asmtId = B.asmtId
+          WHERE
+              (A.action ILIKE '%removed%')
+          GROUP BY
+               A.patientId,
+               A.DiagCode,
+               A.ProblemName,
+               A.asmtId,
+               B.logDate,
+               A.AddedDate
+        ) AS Removed
+RIGHT OUTER JOIN
+        problemlistlog ON Removed.asmtId = problemlistlog.asmtId AND Removed.DiagCode = problemlistlog.item AND Removed.patientId = problemlistlog.patientId ON problemlist.asmtId = problemlistlog.asmtId AND problemlist.patientId = problemlistlog.patientId
+LEFT OUTER JOIN
+        users ON problemlist.userid = users.uid
+WHERE
+       (problemlist.Resolved = 0) AND (problemlist.inactiveFlag = 0) AND (Removed.asmtId IS NULL) AND (problemlist.deleteFlag = 0)
+GROUP BY
+        problemlist.patientId,
+        COALESCE(problemlistlog.itemName, items.itemName),
+        COALESCE(problemlistlog.item, itemdetail.value),
+        patients.ControlNo,
+        users.ufname || ' ' || users.ulname, users.uid, problemlist.AddedDate
+HAVING
+       (problemlist.AddedDate NOT ILIKE  '1/1/1900') AND (COALESCE(problemlistlog.item, itemdetail.value) IS NOT NULL);
+
+--Create UTOX Table that only pulls URINE DRUG PANEL w/REFLEX lab results
+
+DROP TABLE IF EXISTS mat_uds_labs;
+CREATE TEMPORARY TABLE mat_uds_labs AS
+
+    SELECT
+         l.lab,
+         l.reportid,
+         l.patientid,
+         d.name AS attribute_name,
+         d.value AS attribute_value
+
+    FROM
+         relevant_uds_labs l
+    INNER JOIN
+        hl7labdatadetail d ON d.reportid = l.reportid
+    WHERE
+        (l.lab ILIKE 'URINE DRUG PANEL W/REFLEX CONFIRMATION')
+    AND
+        (d.name ILIKE '%buprenorphine');
+
+DROP T
